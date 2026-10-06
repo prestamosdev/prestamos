@@ -1,6 +1,6 @@
 import { getDb, nowIso, todayIso, uuid } from './db';
 import {
-  buildSchedule, computeStatus, splitPayment, Frequency, InterestType, LoanStatus, Installment,
+  buildLedger, computeStatus, splitSinglePayment, LoanStatus, LedgerState, RawPayment
 } from '../domain/amortization';
 
 export interface Client {
@@ -9,19 +9,13 @@ export interface Client {
 }
 export interface Loan {
   id: string; lender_id: string; client_id: string; amount: number; interest_rate: number;
-  interest_type: InterestType; frequency: Frequency; installments: number;
+  interest_type: string; frequency: string; installments: number;
   status: LoanStatus; start_date: string;
 }
 export interface Payment {
   id: string; lender_id: string; loan_id: string; amount_paid: number; capital_portion: number;
   interest_portion: number; remaining_balance: number; payment_date: string; reversed_at: string | null;
 }
-
-export const scheduleOf = (l: Loan): Installment[] =>
-  buildSchedule({
-    amount: l.amount, monthlyRate: l.interest_rate, frequency: l.frequency,
-    installments: l.installments, interestType: l.interest_type, startDate: l.start_date,
-  });
 
 // ---------- Clientes ----------
 export async function listClients(lender: string): Promise<Client[]> {
@@ -68,7 +62,7 @@ export async function createLoan(
   await db.runAsync(
     `INSERT INTO loans(id,lender_id,client_id,amount,interest_rate,interest_type,frequency,installments,status,start_date,created_at,updated_at)
      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [id, lender, l.client_id, l.amount, l.interest_rate, l.interest_type, l.frequency,
+    [id, lender, l.client_id, l.amount, l.interest_rate, 'simple', 'monthly',
       l.installments, 'active', l.start_date, t, t]);
   return id;
 }
@@ -93,17 +87,32 @@ export async function listPayments(lender: string, loanId: string): Promise<Paym
     'SELECT * FROM payments WHERE lender_id=? AND loan_id=? ORDER BY payment_date DESC', [lender, loanId]);
 }
 
-export interface LoanSummary { balance: number; paid: number; status: LoanStatus }
+export interface LoanSummary { balance: number; paid: number; status: LoanStatus; pendingInterest: number; totalInterestGenerated: number }
 
-export async function loanSummary(lender: string, loan: Loan): Promise<LoanSummary> {
-  const db = await getDb(lender);
-  const r = await db.getFirstAsync<{ paid: number | null; cap: number | null }>(
-    'SELECT SUM(amount_paid) paid, SUM(capital_portion) cap FROM payments WHERE loan_id=? AND lender_id=? AND reversed_at IS NULL',
-    [loan.id, lender]);
-  const paid = r?.paid ?? 0;
-  const balance = Math.max(0, loan.amount - (r?.cap ?? 0));
-  const status = computeStatus(scheduleOf(loan), paid, todayIso(), balance);
-  return { balance, paid, status };
+export async function loanSummary(lender: string, loan: Loan | string): Promise<LoanSummary> {
+  const l = typeof loan === 'string' ? await getLoan(lender, loan) : loan;
+  if (!l) throw new Error('Préstamo no encontrado');
+  
+  const pays = await listPayments(lender, l.id);
+  const validPays: RawPayment[] = pays.filter(p => !p.reversed_at).map(p => ({
+    id: p.id,
+    date: p.payment_date,
+    amount: p.amount_paid
+  }));
+  
+  const state = buildLedger({
+    amount: l.amount,
+    monthlyRate: l.interest_rate,
+    startDate: l.start_date
+  }, validPays, todayIso());
+
+  return { 
+    balance: state.capitalBalance, 
+    paid: state.totalPaid, 
+    status: computeStatus(state),
+    pendingInterest: state.pendingInterest,
+    totalInterestGenerated: state.totalInterestGenerated
+  };
 }
 
 async function refreshStatus(lender: string, loanId: string) {
@@ -116,12 +125,29 @@ async function refreshStatus(lender: string, loanId: string) {
 
 // ---------- Abonos ----------
 export async function addPayment(lender: string, loanId: string, amount: number): Promise<string> {
-  const loan = await getLoan(lender, loanId);
-  if (!loan) throw new Error('Préstamo no encontrado');
+  const l = await getLoan(lender, loanId);
+  if (!l) throw new Error('Préstamo no encontrado');
   if (!(amount > 0)) throw new Error('El monto debe ser mayor a 0');
-  const sum = await loanSummary(lender, loan);
-  if (sum.balance <= 0) throw new Error('El préstamo ya está finalizado');
-  const split = splitPayment(amount, scheduleOf(loan), sum.paid, sum.balance);
+  
+  const pays = await listPayments(lender, loanId);
+  const validPays: RawPayment[] = pays.filter(p => !p.reversed_at).map(p => ({
+    id: p.id,
+    date: p.payment_date,
+    amount: p.amount_paid
+  }));
+  
+  const state = buildLedger({
+    amount: l.amount,
+    monthlyRate: l.interest_rate,
+    startDate: l.start_date
+  }, validPays, todayIso());
+
+  if (state.capitalBalance <= 0 && state.pendingInterest <= 0) {
+    throw new Error('El préstamo ya está finalizado');
+  }
+
+  const split = splitSinglePayment(amount, state.pendingInterest, state.capitalBalance);
+  
   const db = await getDb(lender);
   const id = uuid();
   const t = nowIso();

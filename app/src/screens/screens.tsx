@@ -290,38 +290,32 @@ export function LoanFormScreen({ route, navigation }: any) {
   const { clientId } = route.params;
   const [amount, setAmount] = useState('');
   const [rate, setRate] = useState('10');
-  const [n, setN] = useState('4');
-  const [freq, setFreq] = useState<Frequency>('monthly');
-  const [type, setType] = useState<InterestType>('french');
+  const [n, setN] = useState('4'); // Meses esperados (referencia)
   const [start, setStart] = useState(todayIso());
   const num = (v: string) => Number(v.replace(/[^\d.]/g, '')) || 0;
-  const preview = buildSchedule({ amount: num(amount), monthlyRate: num(rate), frequency: freq, installments: Math.floor(num(n)), interestType: type, startDate: start });
+  
+  const estimatedInterest = num(amount) * (num(rate) / 100);
+
   const save = async () => {
-    if (!preview.length) return Alert.alert('Revisa monto y número de cuotas');
+    if (num(amount) <= 0) return Alert.alert('Ingresa un monto válido');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return Alert.alert('Fecha inválida (AAAA-MM-DD)');
     const id = await createLoan(lender, {
-      client_id: clientId, amount: num(amount), interest_rate: num(rate), interest_type: type,
-      frequency: freq, installments: Math.floor(num(n)), start_date: start,
+      client_id: clientId, amount: num(amount), interest_rate: num(rate), interest_type: 'simple',
+      frequency: 'monthly', installments: Math.floor(num(n)), start_date: start,
     });
     navigation.replace('LoanDetail', { id });
   };
-  const tOpts = (Object.keys(INTEREST_TYPE_LABELS) as InterestType[]).map((v) => ({ v, l: INTEREST_TYPE_LABELS[v] }));
-  const fOpts = (Object.keys(FREQUENCY_LABELS) as Frequency[]).map((v) => ({ v, l: FREQUENCY_LABELS[v] }));
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.pad}>
-      <Field label="Monto (COP)" value={amount} keyboardType="numeric" onChangeText={setAmount} />
+      <Field label="Monto prestado (COP)" value={amount} keyboardType="numeric" onChangeText={setAmount} />
       <Field label="Tasa de interés mensual (%)" value={rate} keyboardType="numeric" onChangeText={setRate} />
-      <Field label="Número de cuotas" value={n} keyboardType="numeric" onChangeText={setN} />
-      <Text style={s.label}>Modalidad de pago</Text>
-      <Chips value={freq} options={fOpts} onChange={setFreq} />
-      <Text style={s.label}>Tipo de interés</Text>
-      <Chips value={type} options={tOpts} onChange={setType} />
+      <Field label="Meses a pagar (Opcional)" value={n} keyboardType="numeric" onChangeText={setN} />
       <Field label="Fecha de inicio (AAAA-MM-DD)" value={start} onChangeText={setStart} />
-      {preview.length > 0 && (
+      {num(amount) > 0 && (
         <Card>
-          <Text style={s.title}>Cuota: {formatCOP(preview[0].payment)}</Text>
-          <Text style={s.sub}>Total intereses: {formatCOP(totalInterest(preview))}</Text>
-          <Text style={s.sub}>Total a pagar: {formatCOP(num(amount) + totalInterest(preview))}</Text>
+          <Text style={s.title}>Proyección Mensual</Text>
+          <Text style={s.sub}>Interés generado por mes: {formatCOP(estimatedInterest)}</Text>
+          <Text style={s.sub}>Si paga en {n} meses, el pago mensual sugerido es {formatCOP((num(amount) / num(n)) + estimatedInterest)}</Text>
         </Card>
       )}
       <Btn title="Crear préstamo" onPress={save} />
@@ -337,11 +331,15 @@ export function LoanDetailScreen({ route }: any) {
   const [pays, setPays] = useState<Payment[]>([]);
   const [amt, setAmt] = useState('');
   const [client, setClient] = useState<Client | null>(null);
+  const [lenderName, setLenderName] = useState('Prestamista');
+
   const load = useCallback(async () => {
     const l = await getLoan(lender, id);
     if (!l) return;
     setLoan(l); setSum(await loanSummary(lender, l)); setPays(await listPayments(lender, id));
     setClient(await getClient(lender, l.client_id));
+    const ln = await AsyncStorage.getItem(`userName_${lender}`);
+    if (ln) setLenderName(ln);
   }, [lender, id]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
   if (!loan || !sum) return null;
@@ -353,7 +351,7 @@ export function LoanDetailScreen({ route }: any) {
       const p = (await listPayments(lender, id)).find((x) => x.id === pid)!;
       Alert.alert('Abono registrado', '¿Generar recibo PDF?', [
         { text: 'No' },
-        { text: 'Recibo', onPress: () => renderAndShare(receiptHtml(client!, loan, p)) },
+        { text: 'Recibo', onPress: () => renderAndShare(receiptHtml(client!, loan, p, lenderName)) },
       ]);
     } catch (e: any) { Alert.alert('Error', e.message); }
   };
@@ -364,40 +362,43 @@ export function LoanDetailScreen({ route }: any) {
       try { await editPayment(lender, p.id, Number(v.replace(/[^\d.]/g, ''))); load(); } catch (e: any) { Alert.alert('Error', e.message); }
     }, 'plain-text', String(p.amount_paid), 'numeric');
   };
-  const sched = scheduleOf(loan);
+  
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.pad}>
       <Card>
         <Text style={s.sub}>{client?.name}</Text>
         <Text style={s.title}>{formatCOP(loan.amount)} · {STATUS_LABELS[sum.status]}</Text>
-        <Text style={s.sub}>{loan.interest_rate}% mensual · {INTEREST_TYPE_LABELS[loan.interest_type]} · {loan.installments} cuotas {FREQUENCY_LABELS[loan.frequency].toLowerCase()}es</Text>
-        <View style={s.row}><Text>Pagado</Text><Text style={{ fontWeight: '700' }}>{formatCOP(sum.paid)}</Text></View>
-        <View style={s.row}><Text>Saldo capital</Text><Text style={{ fontWeight: '700' }}>{formatCOP(sum.balance)}</Text></View>
+        <Text style={s.sub}>{loan.interest_rate}% de interés mensual</Text>
+        
+        <View style={{ height: 1, backgroundColor: '#E5E7EB', marginVertical: 12 }} />
+        
+        <View style={s.row}><Text>Capital Pendiente</Text><Text style={{ fontWeight: '800', fontSize: 16 }}>{formatCOP(sum.balance)}</Text></View>
+        <View style={s.row}><Text>Intereses Pendientes</Text><Text style={{ fontWeight: '800', fontSize: 16, color: sum.pendingInterest > 0 ? colors.danger : colors.text }}>{formatCOP(sum.pendingInterest)}</Text></View>
+        
+        <View style={{ height: 1, backgroundColor: '#E5E7EB', marginVertical: 12 }} />
+        <View style={s.row}><Text>Total Pagado a la fecha</Text><Text style={{ fontWeight: '700' }}>{formatCOP(sum.paid)}</Text></View>
+        <View style={s.row}><Text>Intereses generados hasta hoy</Text><Text style={{ fontWeight: '700' }}>{formatCOP(sum.totalInterestGenerated)}</Text></View>
       </Card>
+
       {sum.status !== 'finished' && (
         <>
-          <Field label="Registrar abono (COP)" value={amt} keyboardType="numeric" onChangeText={setAmt} placeholder={formatCOP(sched[0]?.payment ?? 0)} />
-          <Btn title="Registrar abono" onPress={pay} />
+          <Field label="Registrar abono (COP)" value={amt} keyboardType="numeric" onChangeText={setAmt} placeholder={formatCOP(sum.pendingInterest > 0 ? sum.pendingInterest : 0)} />
+          <Btn title="Abonar" onPress={pay} />
         </>
       )}
-      <Btn title="Cronograma (PDF)" kind="ghost" onPress={async () => renderAndShare(await scheduleHtml(lender, id))} />
-      <Text style={[s.title, { marginVertical: 8 }]}>Cronograma</Text>
-      {sched.map((r) => (
-        <View key={r.number} style={s.row}>
-          <Text>{r.number}. {r.dueDate}</Text><Text>{formatCOP(r.payment)}</Text>
-        </View>
-      ))}
-      <Text style={[s.title, { marginVertical: 8 }]}>Abonos</Text>
+      
+      <Text style={[s.title, { marginVertical: 8 }]}>Historial de Pagos</Text>
       {pays.map((p) => (
         <Card key={p.id}>
           <View style={s.row}>
             <Text style={[s.title, p.reversed_at ? { textDecorationLine: 'line-through', color: colors.muted } : null]}>{formatCOP(p.amount_paid)}</Text>
             <Text style={s.sub}>{new Date(p.payment_date).toLocaleString('es-CO')}</Text>
           </View>
-          <Text style={s.sub}>Capital {formatCOP(p.capital_portion)} · Interés {formatCOP(p.interest_portion)} · Saldo {formatCOP(p.remaining_balance)}</Text>
+          <Text style={s.sub}>Capital: {formatCOP(p.capital_portion)} · Interés: {formatCOP(p.interest_portion)}</Text>
+          <Text style={s.sub}>Saldo posterior: {formatCOP(p.remaining_balance)}</Text>
           {p.reversed_at ? <Text style={{ color: colors.danger }}>Revertido</Text> : (
             <View style={{ flexDirection: 'row', marginTop: 8 }}>
-              <View style={{ flex: 1, marginRight: 4 }}><Btn title="Recibo" kind="ghost" onPress={() => renderAndShare(receiptHtml(client!, loan, p))} /></View>
+              <View style={{ flex: 1, marginRight: 4 }}><Btn title="Recibo" kind="ghost" onPress={() => renderAndShare(receiptHtml(client!, loan, p, lenderName))} /></View>
               <View style={{ flex: 1, marginRight: 4 }}><Btn title="Editar" kind="ghost" onPress={() => edit(p)} /></View>
               <View style={{ flex: 1 }}><Btn title="Revertir" kind="danger" onPress={() => reverse(p)} /></View>
             </View>

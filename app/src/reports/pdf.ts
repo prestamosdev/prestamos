@@ -1,10 +1,10 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
-import { formatCOP, STATUS_LABELS, INTEREST_TYPE_LABELS, FREQUENCY_LABELS } from '../domain/amortization';
+import { formatCOP, STATUS_LABELS } from '../domain/amortization';
 import {
   Client, Loan, Payment, PaymentRow, getClient, getLoan, listLoans, listPayments,
-  loanSummary, paymentsInRange, scheduleOf,
+  loanSummary, paymentsInRange,
 } from '../db/repo';
 
 const esc = (s: string | null | undefined) =>
@@ -34,7 +34,7 @@ const wrap = (title: string, body: string) =>
    </div>
    ${body}</body></html>`;
 
-export function receiptHtml(client: Client, loan: Loan, p: Payment): string {
+export function receiptHtml(client: Client, loan: Loan, p: Payment, lenderName: string = 'Prestamista'): string {
   return wrap('Recibo de pago', `
     <h2>Cliente</h2><p>${esc(client.name)} — Doc: ${esc(client.document_id)}</p>
     <h2>Pago</h2>
@@ -46,7 +46,13 @@ export function receiptHtml(client: Client, loan: Loan, p: Payment): string {
       <tr><th>A intereses</th><td>${formatCOP(p.interest_portion)}</td></tr>
       <tr class="tot"><th>Saldo pendiente</th><td>${formatCOP(p.remaining_balance)}</td></tr>
     </table>
-    <p class="muted">Préstamo de ${formatCOP(loan.amount)} — ${FREQUENCY_LABELS[loan.frequency]}</p>`);
+    <p class="muted">Préstamo original: ${formatCOP(loan.amount)}</p>
+    
+    <div style="margin-top: 60px; text-align: center; width: 60%; margin-left: auto; margin-right: auto;">
+      <div style="border-top: 1px solid #000; margin-bottom: 8px;"></div>
+      <p style="margin: 0; font-weight: bold;">${esc(lenderName)}</p>
+      <p style="margin: 0; font-size: 12px; color: #6B7280;">Firma de quien recibe</p>
+    </div>`);
 }
 
 export async function accountStatementHtml(lender: string, clientId: string, from?: string, to?: string): Promise<string> {
@@ -62,8 +68,8 @@ export async function accountStatementHtml(lender: string, clientId: string, fro
     if (from) pays = pays.filter((p) => p.payment_date >= new Date(from + 'T00:00:00').toISOString());
     if (to) pays = pays.filter((p) => p.payment_date <= new Date(to + 'T23:59:59.999').toISOString());
     body += `<h2>Préstamo ${formatCOP(l.amount)} — ${STATUS_LABELS[s.status]}</h2>
-      <p class="muted">Inicio ${l.start_date} · ${l.interest_rate}% mensual · ${INTEREST_TYPE_LABELS[l.interest_type]} · ${l.installments} cuotas ${FREQUENCY_LABELS[l.frequency].toLowerCase()}es · Saldo ${formatCOP(s.balance)}</p>
-      <table><tr><th>Fecha</th><th class="r">Abono</th><th class="r">Capital</th><th class="r">Interés</th><th class="r">Saldo</th></tr>
+      <p class="muted">Inicio ${l.start_date} · ${l.interest_rate}% de interés mensual · Saldo de Capital ${formatCOP(s.balance)} · Intereses pendientes ${formatCOP(s.pendingInterest)}</p>
+      <table><tr><th>Fecha</th><th class="r">Abono</th><th class="r">Capital</th><th class="r">Interés</th><th class="r">Saldo Posterior</th></tr>
       ${pays.map((p) => `<tr><td>${fmtDate(p.payment_date)}</td><td class="r">${formatCOP(p.amount_paid)}</td><td class="r">${formatCOP(p.capital_portion)}</td><td class="r">${formatCOP(p.interest_portion)}</td><td class="r">${formatCOP(p.remaining_balance)}</td></tr>`).join('') || '<tr><td colspan="5">Sin abonos en el periodo</td></tr>'}
       </table>`;
   }
@@ -78,14 +84,6 @@ export async function cashCloseHtml(lender: string, from: string, to: string, cl
     <table><tr><th>Fecha</th><th>Cliente</th><th class="r">Abono</th><th class="r">Capital</th><th class="r">Interés</th></tr>
     ${rows.map((r) => `<tr><td>${fmtDate(r.payment_date)}</td><td>${esc(r.client_name)}</td><td class="r">${formatCOP(r.amount_paid)}</td><td class="r">${formatCOP(r.capital_portion)}</td><td class="r">${formatCOP(r.interest_portion)}</td></tr>`).join('') || '<tr><td colspan="5">Sin recaudo en el periodo</td></tr>'}
     <tr class="tot"><td colspan="2">TOTAL (${rows.length} abonos)</td><td class="r">${formatCOP(sum('amount_paid'))}</td><td class="r">${formatCOP(sum('capital_portion'))}</td><td class="r">${formatCOP(sum('interest_portion'))}</td></tr></table>`);
-}
-
-export async function scheduleHtml(lender: string, loanId: string): Promise<string> {
-  const loan = await getLoan(lender, loanId);
-  if (!loan) throw new Error('Préstamo no encontrado');
-  const s = scheduleOf(loan);
-  return wrap('Cronograma de pagos', `<table><tr><th>#</th><th>Vence</th><th class="r">Cuota</th><th class="r">Capital</th><th class="r">Interés</th><th class="r">Saldo</th></tr>
-    ${s.map((r) => `<tr><td>${r.number}</td><td>${r.dueDate}</td><td class="r">${formatCOP(r.payment)}</td><td class="r">${formatCOP(r.capital)}</td><td class="r">${formatCOP(r.interest)}</td><td class="r">${formatCOP(r.balance)}</td></tr>`).join('')}</table>`);
 }
 
 export async function renderAndShare(html: string): Promise<string> {
